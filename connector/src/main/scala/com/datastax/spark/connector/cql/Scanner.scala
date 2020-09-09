@@ -1,7 +1,7 @@
 package com.datastax.spark.connector.cql
 
 import com.datastax.oss.driver.api.core.CqlSession
-import com.datastax.oss.driver.api.core.cql.{Row, Statement}
+import com.datastax.oss.driver.api.core.cql.{PreparedStatement, Row, Statement}
 import com.datastax.spark.connector.CassandraRowMetadata
 import com.datastax.spark.connector.rdd.ReadConf
 import com.datastax.spark.connector.rdd.reader.PrefetchingResultSetIterator
@@ -16,7 +16,10 @@ import com.datastax.spark.connector.writer.RateLimiter
   */
 trait Scanner {
   def close(): Unit
+  @deprecated("This method will be removed. The session returned by this method may not contain all the " +
+    "configuration settings", "3.1.0")
   def getSession(): CqlSession
+  def prepare(cql: String): PreparedStatement = getSession().prepare(cql)
   def scan[StatementT <: Statement[StatementT]](statement: StatementT): ScanResult
 }
 

@@ -7,9 +7,14 @@
 package com.datastax.spark.connector.cql
 
 import com.datastax.bdp.spark.ContinuousPagingScanner
+import com.datastax.dse.driver.api.core.config.DseDriverOption
+import com.datastax.oss.driver.api.core.DefaultProtocolVersion.V4
+import com.datastax.oss.driver.api.core.cql.Statement
 import com.datastax.spark.connector._
 import com.datastax.spark.connector.cluster.DefaultCluster
 import com.datastax.spark.connector.rdd.ReadConf
+import org.mockito.ArgumentCaptor
+import org.mockito.Mockito._
 import org.scalatest.concurrent.Eventually
 
 import scala.concurrent.Future
@@ -65,7 +70,9 @@ class ContinuousPagingScannerSpec extends SparkCassandraITFlatSpecBase with Defa
 
   it should "use a single CP session for all threads" in {
     CassandraConnector.evictCache()
-    eventually {CassandraConnector.sessionCache.cache.isEmpty}
+    eventually {
+      CassandraConnector.sessionCache.cache.isEmpty
+    }
     val rdd = sc.cassandraTable(ks, table).withReadConf(ReadConf(splitCount = Some(400)))
     rdd.partitions.length should be > 100 //Sanity check that we will have to reuse sessions
     rdd.count
@@ -75,6 +82,40 @@ class ContinuousPagingScannerSpec extends SparkCassandraITFlatSpecBase with Defa
       .keys
 
     withClue(sessions.map(_.toString).mkString("\n"))(sessions.size should be(1))
+  }
+
+  private def executeContinuousPagingScan(readConf: ReadConf): Statement[_] = {
+    // we don't want to use the session from CC as mockito is unable to spy on a Proxy
+    val cqlSession = conn.conf.connectionFactory.createSession(conn.conf)
+    try {
+      val sessionSpy = spy(cqlSession)
+      val scanner = ContinuousPagingScanner(readConf, conn.conf, IndexedSeq.empty, sessionSpy)
+      val stmt = sessionSpy.prepare(s"SELECT * FROM $ks.test1").bind()
+      val statementCaptor = ArgumentCaptor.forClass(classOf[Statement[_]])
+
+      scanner.scan(stmt)
+      verify(sessionSpy).executeContinuously(statementCaptor.capture())
+      statementCaptor.getValue
+    } finally {
+      cqlSession.close()
+    }
+  }
+
+  it should "apply MB/s throughput limit" in skipIfNotDSE(conn) {
+    val executedStmt = executeContinuousPagingScan(ReadConf(throughputMiBPS = Some(32.0)))
+
+    executedStmt.getExecutionProfile.getBoolean(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE_BYTES) should be(true)
+    executedStmt.getExecutionProfile.getInt(DseDriverOption.CONTINUOUS_PAGING_MAX_PAGES_PER_SECOND) should be (1000)
+    executedStmt.getExecutionProfile.getInt(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE) should be(33554) // 32MB/s
+  }
+
+  it should "apply reads/s throughput limit" in skipIfNotDSE(conn) {
+    val executedStmt = executeContinuousPagingScan(
+      ReadConf(fetchSizeInRows = 999, readsPerSec = Some(5)))
+
+    executedStmt.getExecutionProfile.getBoolean(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE_BYTES) should be(false)
+    executedStmt.getExecutionProfile.getInt(DseDriverOption.CONTINUOUS_PAGING_MAX_PAGES_PER_SECOND) should be(5)
+    executedStmt.getExecutionProfile.getInt(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE) should be(999)
   }
 }
 
