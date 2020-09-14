@@ -306,9 +306,9 @@ class CassandraTableScanRDD[R] private[connector](
     (queryTemplate, queryParamValues)
   }
 
-  private def createStatement(scanner: Scanner, cql: String, values: Any*): BoundStatement = {
+  private def createStatement(session: CqlSession, cql: String, values: Any*): BoundStatement = {
     try {
-      val stmt = scanner.prepare(cql)
+      val stmt = session.prepare(cql)
       val converters = stmt.getVariableDefinitions
         .map(v => ColumnType.converterToCassandra(v.getType))
         .toArray
@@ -336,7 +336,7 @@ class CassandraTableScanRDD[R] private[connector](
       s"Fetching data for range ${range.cql(partitionKeyStr)} " +
         s"with $cql " +
         s"with params ${values.mkString("[", ",", "]")}")
-    val stmt = createStatement(scanner, cql, values: _*)
+    val stmt = createStatement(scanner.getSession(), cql, values: _*)
       .setRoutingToken(range.range.startNativeToken())
 
     try {

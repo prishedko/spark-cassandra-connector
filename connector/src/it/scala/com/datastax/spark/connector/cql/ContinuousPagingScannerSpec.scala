@@ -53,6 +53,23 @@ class ContinuousPagingScannerSpec extends SparkCassandraITFlatSpecBase with Defa
     }
   }
 
+  private def executeContinuousPagingScan(readConf: ReadConf): Statement[_] = {
+    // we don't want to use the session from CC as mockito is unable to spy on a Proxy
+    val cqlSession = conn.conf.connectionFactory.createSession(conn.conf)
+    try {
+      val sessionSpy = spy(cqlSession)
+      val scanner = ContinuousPagingScanner(readConf, conn.conf, IndexedSeq.empty, sessionSpy)
+      val stmt = sessionSpy.prepare(s"SELECT * FROM $ks.test1").bind()
+      val statementCaptor = ArgumentCaptor.forClass(classOf[Statement[_]])
+
+      scanner.scan(stmt)
+      verify(sessionSpy).executeContinuously(statementCaptor.capture())
+      statementCaptor.getValue
+    } finally {
+      cqlSession.close()
+    }
+  }
+
   "ContinuousPagingScanner" should "re-use a session in the same thread" in {
     val sessions = for (x <- 1 to 10) yield {
       val cps = ContinuousPagingScanner(ReadConf(), conn.conf, IndexedSeq.empty)
@@ -84,39 +101,39 @@ class ContinuousPagingScannerSpec extends SparkCassandraITFlatSpecBase with Defa
     withClue(sessions.map(_.toString).mkString("\n"))(sessions.size should be(1))
   }
 
-  private def executeContinuousPagingScan(readConf: ReadConf): Statement[_] = {
-    // we don't want to use the session from CC as mockito is unable to spy on a Proxy
-    val cqlSession = conn.conf.connectionFactory.createSession(conn.conf)
-    try {
-      val sessionSpy = spy(cqlSession)
-      val scanner = ContinuousPagingScanner(readConf, conn.conf, IndexedSeq.empty, sessionSpy)
-      val stmt = sessionSpy.prepare(s"SELECT * FROM $ks.test1").bind()
-      val statementCaptor = ArgumentCaptor.forClass(classOf[Statement[_]])
-
-      scanner.scan(stmt)
-      verify(sessionSpy).executeContinuously(statementCaptor.capture())
-      statementCaptor.getValue
-    } finally {
-      cqlSession.close()
-    }
-  }
-
   it should "apply MB/s throughput limit" in skipIfNotDSE(conn) {
-    val executedStmt = executeContinuousPagingScan(ReadConf(throughputMiBPS = Some(32.0)))
+    val readConf = ReadConf(throughputMiBPS = Some(32.0))
+    val executedStmt = executeContinuousPagingScan(readConf)
 
     executedStmt.getExecutionProfile.getBoolean(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE_BYTES) should be(true)
-    executedStmt.getExecutionProfile.getInt(DseDriverOption.CONTINUOUS_PAGING_MAX_PAGES_PER_SECOND) should be (1000)
+    executedStmt.getExecutionProfile.getInt(DseDriverOption.CONTINUOUS_PAGING_MAX_PAGES_PER_SECOND) should be(1000)
     executedStmt.getExecutionProfile.getInt(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE) should be(33554) // 32MB/s
   }
 
   it should "apply reads/s throughput limit" in skipIfNotDSE(conn) {
-    val executedStmt = executeContinuousPagingScan(
-      ReadConf(fetchSizeInRows = 999, readsPerSec = Some(5)))
+    val readConf = ReadConf(fetchSizeInRows = 999, readsPerSec = Some(5))
+    val executedStmt = executeContinuousPagingScan(readConf)
 
     executedStmt.getExecutionProfile.getBoolean(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE_BYTES) should be(false)
     executedStmt.getExecutionProfile.getInt(DseDriverOption.CONTINUOUS_PAGING_MAX_PAGES_PER_SECOND) should be(5)
     executedStmt.getExecutionProfile.getInt(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE) should be(999)
   }
+
+  it should "throw a meaningful exception when pages per second does not fall int (0, Int.MaxValue)" in skipIfNotDSE(conn) {
+    val readConfs = Seq(
+      ReadConf(throughputMiBPS = Some(1.0 + Int.MaxValue), readsPerSec = Some(1)),
+      ReadConf(throughputMiBPS = Some(-1)),
+      ReadConf(throughputMiBPS = Some(0)))
+
+    for (readConf <- readConfs) {
+      withClue(s"Expected IllegalArgumentException for invalid throughput argument: ${readConf.throughputMiBPS}.") {
+        val exc = intercept[IllegalArgumentException] {
+          executeContinuousPagingScan(readConf)
+        }
+        exc.getMessage should include(s"This number must be positive, non-zero and smaller than ${Int.MaxValue}")
+      }
+    }
+  }
+
+
 }
-
-

@@ -32,20 +32,21 @@ case class ContinuousPagingScanner(
 
   private lazy val cpProfile = readConf.throughputMiBPS match {
     case Some(throughput) =>
-      val bytesPerSecond = (throughput * 1024 * 1024).toInt
+      val bytesPerSecond = (throughput * 1024 * 1024).toLong
       val fallBackPagesPerSecond = math.max(MIN_PAGES_PER_SECOND, bytesPerSecond / TARGET_PAGE_SIZE_IN_BYTES)
-      val pagesPerSecond: Int = readConf.readsPerSec.getOrElse(fallBackPagesPerSecond)
+      val pagesPerSecond = readConf.readsPerSec.map(_.toLong).getOrElse(fallBackPagesPerSecond)
       if (readConf.readsPerSec.isEmpty) {
         logInfo(s"Using a pages per second of $pagesPerSecond since " +
           s"${ReadConf.ReadsPerSecParam.name} is not set")
       }
-      val bytesPerPage = (bytesPerSecond / pagesPerSecond).toInt
+      val bytesPerPage = bytesPerSecond / pagesPerSecond
 
-      if (bytesPerPage <= 0) {
+      if (bytesPerPage <= 0 || bytesPerPage > Int.MaxValue) {
         throw new IllegalArgumentException(
           s"""Read Throttling set to $throughput MBPS, but with the current
              | ${ReadConf.ReadsPerSecParam.name} value of $pagesPerSecond that equates to
-             | $bytesPerPage bytes per page. This number must be positive and non-zero.
+             | $bytesPerPage bytes per page.
+             | This number must be positive, non-zero and smaller than ${Int.MaxValue}.
            """.stripMargin)
       }
 
@@ -53,8 +54,8 @@ case class ContinuousPagingScanner(
         s"pages per second. ${ReadConf.FetchSizeInRowsParam.name} will be ignored.")
       cqlSession.getContext.getConfig.getDefaultProfile
         .withBoolean(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE_BYTES, true)
-        .withInt(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE, bytesPerPage)
-        .withInt(DseDriverOption.CONTINUOUS_PAGING_MAX_PAGES_PER_SECOND, pagesPerSecond)
+        .withInt(DseDriverOption.CONTINUOUS_PAGING_PAGE_SIZE, bytesPerPage.toInt)
+        .withInt(DseDriverOption.CONTINUOUS_PAGING_MAX_PAGES_PER_SECOND, pagesPerSecond.toInt)
 
     case None =>
       cqlSession.getContext.getConfig.getDefaultProfile
